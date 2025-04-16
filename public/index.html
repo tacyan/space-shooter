@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>スペースシューター</title>
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            background-color: #222;
+            font-family: 'Arial', sans-serif;
+        }
+        #game-container {
+            position: relative;
+        }
+        #gameCanvas {
+            border: 1px solid #FFF;
+            background-color: #000;
+        }
+        #score-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: Arial, sans-serif;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #status {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            font-family: Arial, sans-serif;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 5px 10px;
+            border-radius: 5px;
+        }
+        #controls {
+            margin-top: 10px;
+            text-align: center;
+            color: white;
+        }
+        h3 {
+            margin-top: 0;
+        }
+        ul {
+            padding-left: 20px;
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+        <div id="score-panel"></div>
+        <div id="status">接続中...</div>
+        <div id="controls">
+            <p>操作方法: ↑↓←→ または WASD で移動、スペースで射撃</p>
+        </div>
+    </div>
+    
+    <script>
+        /**
+         * スペースシューター フロントエンド
+         * WebSocketを使用したリアルタイム通信でサーバーと接続し、
+         * Canvas APIを使用して2Dゲームを描画します。
+         */
+
+        // キャンバスとコンテキストの取得
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scorePanel = document.getElementById('score-panel');
+        const statusDisplay = document.getElementById('status');
+        
+        // ゲーム状態の初期化
+        let socket;
+        let gameState = {
+            players: {},
+            bullets: {},
+            enemies: {}
+        };
+        
+        let myPlayerId = null;
+        let connected = false;
+        
+        /**
+         * WebSocket接続を確立する
+         */
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            
+            statusDisplay.textContent = '接続中...';
+            statusDisplay.style.backgroundColor = 'rgba(255, 165, 0, 0.7)';
+            
+            socket = new WebSocket(wsUrl);
+            
+            socket.onopen = () => {
+                console.log("サーバーに接続しました");
+                statusDisplay.textContent = '接続済み';
+                statusDisplay.style.backgroundColor = 'rgba(0, 128, 0, 0.7)';
+                connected = true;
+            };
+            
+            socket.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                handleMessage(message);
+            };
+            
+            socket.onclose = () => {
+                console.log("サーバーから切断されました");
+                statusDisplay.textContent = '切断されました - 再接続中...';
+                statusDisplay.style.backgroundColor = 'rgba(255, 0, 0, 0.7)';
+                connected = false;
+                setTimeout(connect, 1000); // 再接続
+            };
+            
+            socket.onerror = (error) => {
+                console.error("WebSocketエラー:", error);
+                statusDisplay.textContent = 'エラー - 再接続中...';
+                statusDisplay.style.backgroundColor = 'rgba(255, 0, 0, 0.7)';
+            };
+        }
+        
+        /**
+         * サーバーからのメッセージを処理する
+         * @param {Object} message - 受信したメッセージオブジェクト
+         */
+        function handleMessage(message) {
+            switch(message.type) {
+                case "init":
+                    // 初期化メッセージ処理
+                    myPlayerId = message.data.player.id;
+                    console.log("ゲーム初期化完了、プレイヤーID:", myPlayerId);
+                    break;
+                    
+                case "gameState":
+                    // ゲーム状態更新
+                    gameState = message.data;
+                    renderGame();
+                    updateScorePanel();
+                    break;
+            }
+        }
+        
+        /**
+         * ゲーム画面を描画する
+         */
+        function renderGame() {
+            // 画面クリア
+            ctx.fillStyle = "#000";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // 背景（星）の描画
+            drawStars();
+            
+            // 敵の描画
+            for (const enemyId in gameState.enemies) {
+                const enemy = gameState.enemies[enemyId];
+                drawEnemy(enemy);
+            }
+            
+            // 弾の描画
+            ctx.fillStyle = "#FFFF00";
+            for (const bulletId in gameState.bullets) {
+                const bullet = gameState.bullets[bulletId];
+                ctx.fillRect(bullet.x, bullet.y, bullet.width, bullet.height);
+            }
+            
+            // プレイヤーの描画
+            for (const playerId in gameState.players) {
+                const player = gameState.players[playerId];
+                drawPlayer(player, playerId === myPlayerId);
+            }
+        }
+        
+        /**
+         * 星（背景）を描画する
+         */
+        function drawStars() {
+            // 毎フレーム同じ星が描画されるように乱数シードを固定
+            const seed = 12345;
+            const starCount = 100;
+            
+            ctx.fillStyle = "#FFFFFF";
+            for (let i = 0; i < starCount; i++) {
+                // シンプルな疑似乱数生成
+                const x = ((seed * i * 134775813) % 10000) / 10000 * canvas.width;
+                const y = ((seed * i * 347895137) % 10000) / 10000 * canvas.height;
+                const size = ((seed * i * 893759731) % 10) / 10 * 2 + 1;
+                
+                ctx.beginPath();
+                ctx.arc(x, y, size/2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+        
+        /**
+         * 敵を描画する
+         * @param {Object} enemy - 敵オブジェクト
+         */
+        function drawEnemy(enemy) {
+            // 敵の本体（赤い三角形）
+            ctx.fillStyle = "#FF0000";
+            ctx.beginPath();
+            ctx.moveTo(enemy.x + enemy.width / 2, enemy.y);
+            ctx.lineTo(enemy.x, enemy.y + enemy.height);
+            ctx.lineTo(enemy.x + enemy.width, enemy.y + enemy.height);
+            ctx.closePath();
+            ctx.fill();
+            
+            // 敵の目（白い点）
+            ctx.fillStyle = "#FFFFFF";
+            ctx.beginPath();
+            ctx.arc(enemy.x + enemy.width / 4, enemy.y + enemy.height / 2, 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(enemy.x + (enemy.width * 3) / 4, enemy.y + enemy.height / 2, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        
+        /**
+         * プレイヤーを描画する
+         * @param {Object} player - プレイヤーオブジェクト
+         * @param {boolean} isCurrentPlayer - 現在のプレイヤーかどうか
+         */
+        function drawPlayer(player, isCurrentPlayer) {
+            // プレイヤーの宇宙船
+            ctx.fillStyle = player.color;
+            
+            // 宇宙船の本体
+            ctx.beginPath();
+            ctx.moveTo(player.x + player.width / 2, player.y);
+            ctx.lineTo(player.x, player.y + player.height);
+            ctx.lineTo(player.x + player.width, player.y + player.height);
+            ctx.closePath();
+            ctx.fill();
+            
+            // コックピット
+            ctx.fillStyle = "#FFFFFF";
+            ctx.beginPath();
+            ctx.arc(player.x + player.width / 2, player.y + player.height / 3, 5, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // 推進器（エンジン）
+            ctx.fillStyle = "#FFAA00";
+            ctx.fillRect(player.x + player.width / 4, player.y + player.height, player.width / 8, player.height / 4);
+            ctx.fillRect(player.x + (player.width * 5) / 8, player.y + player.height, player.width / 8, player.height / 4);
+            
+            // プレイヤー名表示
+            ctx.fillStyle = "#FFF";
+            ctx.font = "12px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText(player.name, player.x + player.width / 2, player.y - 5);
+            
+            // 自分のプレイヤーには枠を表示
+            if (isCurrentPlayer) {
+                ctx.strokeStyle = "#00FF00";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(player.x - 2, player.y - 2, player.width + 4, player.height + 4);
+            }
+            
+            // ヘルスバー
+            const healthWidth = player.width * (player.health / 100);
+            ctx.fillStyle = "#00FF00";
+            ctx.fillRect(player.x, player.y + player.height + 5, healthWidth, 5);
+            ctx.strokeStyle = "#FFF";
+            ctx.strokeRect(player.x, player.y + player.height + 5, player.width, 5);
+        }
+        
+        /**
+         * スコアパネルを更新する
+         */
+        function updateScorePanel() {
+            let scoreHtml = "<h3>スコア</h3><ul>";
+            
+            const players = Object.values(gameState.players);
+            players.sort((a, b) => b.score - a.score);
+            
+            for (const player of players) {
+                const isMe = player.id === myPlayerId;
+                scoreHtml += `<li>${isMe ? '➤ ' : ''}${player.name}: ${player.score} ポイント (HP: ${player.health})</li>`;
+            }
+            
+            scoreHtml += "</ul>";
+            scorePanel.innerHTML = scoreHtml;
+        }
+        
+        // キー入力管理
+        const keys = {};
+        
+        document.addEventListener('keydown', (e) => {
+            if (!connected) return;
+            
+            keys[e.key] = true;
+            updateMovement();
+            
+            // スペースキーで射撃
+            if (e.key === ' ' || e.key === 'Spacebar') {
+                socket.send(JSON.stringify({
+                    type: "shoot",
+                    data: {}
+                }));
+                e.preventDefault(); // スクロール防止
+            }
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            if (!connected) return;
+            
+            keys[e.key] = false;
+            updateMovement();
+        });
+        
+        /**
+         * プレイヤーの移動処理
+         * キー入力に基づいて速度を計算し、サーバーに送信
+         */
+        function updateMovement() {
+            let vx = 0;
+            let vy = 0;
+            
+            // 矢印キーまたはWASDで移動
+            if (keys['ArrowLeft'] || keys['a'] || keys['A']) vx = -3;
+            if (keys['ArrowRight'] || keys['d'] || keys['D']) vx = 3;
+            if (keys['ArrowUp'] || keys['w'] || keys['W']) vy = -3;
+            if (keys['ArrowDown'] || keys['s'] || keys['S']) vy = 3;
+            
+            socket.send(JSON.stringify({
+                type: "move",
+                data: { vx, vy }
+            }));
+        }
+        
+        // 接続開始
+        connect();
+    </script>
+</body>
+</html> 
