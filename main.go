@@ -2,13 +2,15 @@
  * @file main.go
  * @description リアルタイム2Dマルチプレイヤーシューティングゲーム「スペースシューター」のバックエンド
  * @author Claude
- * @version 1.0
+ * @version 1.1
  *
  * 概要:
  * - WebSocketを使用したリアルタイム通信
  * - 複数プレイヤーが参加可能なゲームルーム管理
  * - 敵の自動生成と衝突検出
  * - 60FPSでのゲームループ処理
+ * - ボス敵の実装
+ * - クリア・ゲームオーバー画面
  *
  * 制限事項:
  * - データの永続化は行わない（インメモリ）
@@ -56,13 +58,14 @@ var (
  * エンティティ構造体
  * ゲーム内の全てのオブジェクト（プレイヤー、弾、敵）の基本情報
  * @property {string} ID - エンティティの一意識別子
- * @property {string} Type - エンティティの種類（"player", "bullet", "enemy"）
+ * @property {string} Type - エンティティの種類（"player", "bullet", "enemy", "boss"）
  * @property {float64} X - X座標位置
  * @property {float64} Y - Y座標位置
  * @property {float64} VelocityX - X方向の速度
  * @property {float64} VelocityY - Y方向の速度
  * @property {int} Width - 幅（ピクセル）
  * @property {int} Height - 高さ（ピクセル）
+ * @property {int} Health - エンティティの体力（主にボス用）
  */
 type Entity struct {
 	ID        string  `json:"id"`
@@ -73,6 +76,7 @@ type Entity struct {
 	VelocityY float64 `json:"velocityY"`
 	Width     int     `json:"width"`
 	Height    int     `json:"height"`
+	Health    int     `json:"health"`
 }
 
 /**
@@ -99,16 +103,24 @@ type Player struct {
  * @property {map[string]*Player} Players - プレイヤーマップ（キー：プレイヤーID）
  * @property {map[string]*Entity} Bullets - 弾のマップ（キー：弾ID）
  * @property {map[string]*Entity} Enemies - 敵のマップ（キー：敵ID）
+ * @property {*Entity} Boss - ボス敵（存在する場合）
  * @property {time.Time} LastTick - 最後のゲームティック時間
  * @property {sync.Mutex} Mutex - 同時アクセス防止のミューテックス
+ * @property {int} EnemiesDefeated - 倒した敵の数
+ * @property {bool} BossSpawned - ボスが出現済みかどうか
+ * @property {string} GameState - ゲームの状態（"playing", "gameover", "clear"）
  */
 type GameRoom struct {
-	ID       string             `json:"id"`
-	Players  map[string]*Player `json:"players"`
-	Bullets  map[string]*Entity `json:"bullets"`
-	Enemies  map[string]*Entity `json:"enemies"`
-	LastTick time.Time
-	Mutex    sync.Mutex
+	ID              string             `json:"id"`
+	Players         map[string]*Player `json:"players"`
+	Bullets         map[string]*Entity `json:"bullets"`
+	Enemies         map[string]*Entity `json:"enemies"`
+	Boss            *Entity            `json:"boss"`
+	LastTick        time.Time
+	Mutex           sync.Mutex
+	EnemiesDefeated int    `json:"enemiesDefeated"`
+	BossSpawned     bool   `json:"bossSpawned"`
+	GameState       string `json:"gameState"`
 }
 
 /**
@@ -143,11 +155,15 @@ type Message struct {
  */
 func newGameRoom() *GameRoom {
 	return &GameRoom{
-		ID:       uuid.New().String(),
-		Players:  make(map[string]*Player),
-		Bullets:  make(map[string]*Entity),
-		Enemies:  make(map[string]*Entity),
-		LastTick: time.Now(),
+		ID:              uuid.New().String(),
+		Players:         make(map[string]*Player),
+		Bullets:         make(map[string]*Entity),
+		Enemies:         make(map[string]*Entity),
+		Boss:            nil,
+		LastTick:        time.Now(),
+		EnemiesDefeated: 0,
+		BossSpawned:     false,
+		GameState:       "playing",
 	}
 }
 
@@ -216,6 +232,7 @@ func handleWebSocket(c echo.Context) error {
 			VelocityY: 0,
 			Width:     30,
 			Height:    30,
+			Health:    100,
 		},
 		Name:   "Player-" + clientID[:5],
 		Score:  0,
@@ -230,7 +247,7 @@ func handleWebSocket(c echo.Context) error {
 
 	// 空きのあるルームを探す
 	for _, room := range gameRooms {
-		if len(room.Players) < 4 { // 最大4人
+		if len(room.Players) < 4 && room.GameState == "playing" { // 最大4人、プレイ中のルームのみ
 			gameRoom = room
 			break
 		}
@@ -296,6 +313,26 @@ func handleWebSocket(c echo.Context) error {
 			}
 		case "shoot":
 			createBullet(gameRoom, player)
+		case "restart":
+			// ゲームが終了状態の場合、再スタート
+			if gameRoom.GameState == "gameover" || gameRoom.GameState == "clear" {
+				gameRoom.Mutex.Lock()
+				gameRoom.GameState = "playing"
+				gameRoom.EnemiesDefeated = 0
+				gameRoom.BossSpawned = false
+				gameRoom.Boss = nil
+				gameRoom.Enemies = make(map[string]*Entity)
+				gameRoom.Bullets = make(map[string]*Entity)
+
+				// プレイヤーの状態をリセット
+				for _, p := range gameRoom.Players {
+					p.Health = 100
+					p.Score = 0
+					p.X = float64(300 + rand.Intn(300))
+					p.Y = float64(300 + rand.Intn(300))
+				}
+				gameRoom.Mutex.Unlock()
+			}
 		}
 	}
 
@@ -309,6 +346,11 @@ func handleWebSocket(c echo.Context) error {
  * @param {*Player} player - 弾を発射するプレイヤーへのポインタ
  */
 func createBullet(gameRoom *GameRoom, player *Player) {
+	// ゲームがプレイ中の場合のみ弾を発射可能
+	if gameRoom.GameState != "playing" {
+		return
+	}
+
 	bulletID := uuid.New().String()
 	bullet := &Entity{
 		ID:        bulletID,
@@ -332,6 +374,11 @@ func createBullet(gameRoom *GameRoom, player *Player) {
  * @param {*GameRoom} gameRoom - ゲームルームへのポインタ
  */
 func createEnemy(gameRoom *GameRoom) {
+	// ゲームがプレイ中でボスが出現していない場合のみ敵を生成
+	if gameRoom.GameState != "playing" || gameRoom.BossSpawned {
+		return
+	}
+
 	enemyID := uuid.New().String()
 	enemy := &Entity{
 		ID:        enemyID,
@@ -342,10 +389,35 @@ func createEnemy(gameRoom *GameRoom) {
 		VelocityY: float64(rand.Intn(2) + 1),
 		Width:     30,
 		Height:    30,
+		Health:    1,
 	}
 
 	gameRoom.Mutex.Lock()
 	gameRoom.Enemies[enemyID] = enemy
+	gameRoom.Mutex.Unlock()
+}
+
+/**
+ * ボスの作成
+ * 画面上部中央に強力なボスを生成する
+ * @param {*GameRoom} gameRoom - ゲームルームへのポインタ
+ */
+func createBoss(gameRoom *GameRoom) {
+	boss := &Entity{
+		ID:        "boss-" + uuid.New().String(),
+		Type:      "boss",
+		X:         float64(400 - 50), // 画面中央
+		Y:         50,                // 上部
+		VelocityX: 2,                 // 左右に移動
+		VelocityY: 0,
+		Width:     100,
+		Height:    80,
+		Health:    100, // ボスの体力
+	}
+
+	gameRoom.Mutex.Lock()
+	gameRoom.Boss = boss
+	gameRoom.BossSpawned = true
 	gameRoom.Mutex.Unlock()
 }
 
@@ -391,7 +463,15 @@ func gameLoop(gameRoom *GameRoom) {
 			}
 
 		case <-enemyTicker.C:
-			createEnemy(gameRoom)
+			// プレイ中のみ敵を生成
+			if gameRoom.GameState == "playing" {
+				// 一定数の敵を倒したらボス出現
+				if gameRoom.EnemiesDefeated >= 20 && !gameRoom.BossSpawned {
+					createBoss(gameRoom)
+				} else {
+					createEnemy(gameRoom)
+				}
+			}
 		}
 	}
 }
@@ -404,6 +484,11 @@ func gameLoop(gameRoom *GameRoom) {
 func updateGame(gameRoom *GameRoom) {
 	gameRoom.Mutex.Lock()
 	defer gameRoom.Mutex.Unlock()
+
+	// ゲームがプレイ中でない場合は更新しない
+	if gameRoom.GameState != "playing" {
+		return
+	}
 
 	// プレイヤー移動
 	for _, player := range gameRoom.Players {
@@ -436,12 +521,32 @@ func updateGame(gameRoom *GameRoom) {
 			continue
 		}
 
+		// ボスとの衝突判定
+		if gameRoom.Boss != nil && checkCollision(bullet, gameRoom.Boss) {
+			// 衝突したら弾を削除、ボスにダメージ
+			delete(gameRoom.Bullets, id)
+			gameRoom.Boss.Health -= 1
+
+			// ボスを倒したらクリア
+			if gameRoom.Boss.Health <= 0 {
+				gameRoom.GameState = "clear"
+				gameRoom.Boss = nil
+
+				// 全プレイヤーにボーナススコア
+				for _, player := range gameRoom.Players {
+					player.Score += 500
+				}
+			}
+			continue
+		}
+
 		// 敵との衝突判定
 		for enemyID, enemy := range gameRoom.Enemies {
 			if checkCollision(bullet, enemy) {
 				// 衝突したら敵と弾を削除、スコア加算
 				delete(gameRoom.Bullets, id)
 				delete(gameRoom.Enemies, enemyID)
+				gameRoom.EnemiesDefeated++
 
 				// 弾を発射したプレイヤーにスコア加算
 				for _, player := range gameRoom.Players {
@@ -472,14 +577,74 @@ func updateGame(gameRoom *GameRoom) {
 				// 衝突したらダメージ
 				player.Health -= 10
 				if player.Health <= 0 {
-					player.Health = 100
-					player.Score -= 50
-					if player.Score < 0 {
-						player.Score = 0
+					player.Health = 0
+
+					// 全プレイヤーが死亡したらゲームオーバー
+					allPlayersDead := true
+					for _, p := range gameRoom.Players {
+						if p.Health > 0 {
+							allPlayersDead = false
+							break
+						}
+					}
+
+					if allPlayersDead {
+						gameRoom.GameState = "gameover"
 					}
 				}
 				delete(gameRoom.Enemies, id)
 				break
+			}
+		}
+	}
+
+	// ボスの移動と攻撃
+	if gameRoom.Boss != nil {
+		// 左右移動
+		gameRoom.Boss.X += gameRoom.Boss.VelocityX
+
+		// 画面端で反転
+		if gameRoom.Boss.X <= 0 || gameRoom.Boss.X+float64(gameRoom.Boss.Width) >= 800 {
+			gameRoom.Boss.VelocityX *= -1
+		}
+
+		// ランダムで攻撃（ボスの弾発射）
+		if rand.Intn(60) < 5 { // 約1/12の確率で発射
+			bulletID := uuid.New().String()
+			bullet := &Entity{
+				ID:        bulletID,
+				Type:      "bossBullet",
+				X:         gameRoom.Boss.X + float64(gameRoom.Boss.Width)/2,
+				Y:         gameRoom.Boss.Y + float64(gameRoom.Boss.Height),
+				VelocityX: float64(rand.Intn(5) - 2), // ランダムな水平速度
+				VelocityY: float64(rand.Intn(3) + 2), // 下向きに発射
+				Width:     10,
+				Height:    10,
+			}
+			gameRoom.Bullets[bulletID] = bullet
+		}
+
+		// プレイヤーとの衝突判定
+		for _, player := range gameRoom.Players {
+			if checkCollision(gameRoom.Boss, &player.Entity) {
+				// 衝突したら大ダメージ
+				player.Health -= 20
+				if player.Health <= 0 {
+					player.Health = 0
+
+					// 全プレイヤーが死亡したらゲームオーバー
+					allPlayersDead := true
+					for _, p := range gameRoom.Players {
+						if p.Health > 0 {
+							allPlayersDead = false
+							break
+						}
+					}
+
+					if allPlayersDead {
+						gameRoom.GameState = "gameover"
+					}
+				}
 			}
 		}
 	}
@@ -493,9 +658,12 @@ func updateGame(gameRoom *GameRoom) {
 func broadcastGameState(gameRoom *GameRoom) {
 	gameRoom.Mutex.Lock()
 	state := map[string]interface{}{
-		"players": gameRoom.Players,
-		"bullets": gameRoom.Bullets,
-		"enemies": gameRoom.Enemies,
+		"players":         gameRoom.Players,
+		"bullets":         gameRoom.Bullets,
+		"enemies":         gameRoom.Enemies,
+		"boss":            gameRoom.Boss,
+		"gameState":       gameRoom.GameState,
+		"enemiesDefeated": gameRoom.EnemiesDefeated,
 	}
 	gameRoom.Mutex.Unlock()
 
