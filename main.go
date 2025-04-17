@@ -87,13 +87,15 @@ type Entity struct {
  * @property {int} Score - スコア
  * @property {int} Health - 体力値
  * @property {string} Color - プレイヤーカラー（16進数カラーコード）
+ * @property {int} FirePower - プレイヤーの攻撃力（アイテム取得で増加）
  */
 type Player struct {
 	Entity
-	Name   string `json:"name"`
-	Score  int    `json:"score"`
-	Health int    `json:"health"`
-	Color  string `json:"color"`
+	Name      string `json:"name"`
+	Score     int    `json:"score"`
+	Health    int    `json:"health"`
+	Color     string `json:"color"`
+	FirePower int    `json:"firePower"`
 }
 
 /**
@@ -104,6 +106,7 @@ type Player struct {
  * @property {map[string]*Entity} Bullets - 弾のマップ（キー：弾ID）
  * @property {map[string]*Entity} Enemies - 敵のマップ（キー：敵ID）
  * @property {*Entity} Boss - ボス敵（存在する場合）
+ * @property {map[string]*Entity} Items - アイテムのマップ（キー：アイテムID）
  * @property {time.Time} LastTick - 最後のゲームティック時間
  * @property {sync.Mutex} Mutex - 同時アクセス防止のミューテックス
  * @property {int} EnemiesDefeated - 倒した敵の数
@@ -116,6 +119,7 @@ type GameRoom struct {
 	Bullets         map[string]*Entity `json:"bullets"`
 	Enemies         map[string]*Entity `json:"enemies"`
 	Boss            *Entity            `json:"boss"`
+	Items           map[string]*Entity `json:"items"`
 	LastTick        time.Time
 	Mutex           sync.Mutex
 	EnemiesDefeated int    `json:"enemiesDefeated"`
@@ -160,6 +164,7 @@ func newGameRoom() *GameRoom {
 		Bullets:         make(map[string]*Entity),
 		Enemies:         make(map[string]*Entity),
 		Boss:            nil,
+		Items:           make(map[string]*Entity),
 		LastTick:        time.Now(),
 		EnemiesDefeated: 0,
 		BossSpawned:     false,
@@ -234,10 +239,11 @@ func handleWebSocket(c echo.Context) error {
 			Height:    30,
 			Health:    100,
 		},
-		Name:   "Player-" + clientID[:5],
-		Score:  0,
-		Health: 100,
-		Color:  playerColors[rand.Intn(len(playerColors))],
+		Name:      "Player-" + clientID[:5],
+		Score:     0,
+		Health:    100,
+		Color:     playerColors[rand.Intn(len(playerColors))],
+		FirePower: 1,
 	}
 	client.Player = player
 
@@ -340,32 +346,32 @@ func handleWebSocket(c echo.Context) error {
 }
 
 /**
- * 弾の作成
- * プレイヤーの位置から弾を発射する
+ * プレイヤーの FirePower に応じて複数弾を拡散発射
  * @param {*GameRoom} gameRoom - ゲームルームへのポインタ
  * @param {*Player} player - 弾を発射するプレイヤーへのポインタ
  */
 func createBullet(gameRoom *GameRoom, player *Player) {
-	// ゲームがプレイ中の場合のみ弾を発射可能
 	if gameRoom.GameState != "playing" {
 		return
 	}
-
-	bulletID := uuid.New().String()
-	bullet := &Entity{
-		ID:        bulletID,
-		Type:      "bullet",
-		X:         player.X + float64(player.Width)/2 - 2.5, // プレイヤーの中央から発射
-		Y:         player.Y,
-		VelocityX: 0,
-		VelocityY: -5, // 上方向に発射
-		Width:     5,
-		Height:    10,
+	for i := 0; i < player.FirePower; i++ {
+		id := uuid.New().String()
+		// 簡易的に左右に拡散させるオフセット
+		offset := float64(i-(player.FirePower-1)/2) * 5
+		b := &Entity{
+			ID:        id,
+			Type:      "bullet",
+			X:         player.X + float64(player.Width)/2 - 2.5 + offset,
+			Y:         player.Y,
+			VelocityX: offset * 0.2,
+			VelocityY: -6,
+			Width:     5,
+			Height:    10,
+		}
+		gameRoom.Mutex.Lock()
+		gameRoom.Bullets[id] = b
+		gameRoom.Mutex.Unlock()
 	}
-
-	gameRoom.Mutex.Lock()
-	gameRoom.Bullets[bulletID] = bullet
-	gameRoom.Mutex.Unlock()
 }
 
 /**
@@ -422,10 +428,9 @@ func createBoss(gameRoom *GameRoom) {
 }
 
 /**
- * 衝突判定
- * 2つのエンティティの衝突を判定する
- * @param {*Entity} a - エンティティA
- * @param {*Entity} b - エンティティB
+ * 衝突判定（AABB: Axis-Aligned Bounding Box）
+ * @param {Entity} a - エンティティA
+ * @param {Entity} b - エンティティB
  * @returns {bool} - 衝突している場合true
  */
 func checkCollision(a, b *Entity) bool {
@@ -510,51 +515,130 @@ func updateGame(gameRoom *GameRoom) {
 		}
 	}
 
-	// 弾の移動
-	for id, bullet := range gameRoom.Bullets {
-		bullet.X += bullet.VelocityX
-		bullet.Y += bullet.VelocityY
+	// 敵がランダムに撃つ
+	for _, enemy := range gameRoom.Enemies {
+		if rand.Intn(1000) < 5 { // 確率調整
+			bid := uuid.New().String()
+			eb := &Entity{
+				ID:        bid,
+				Type:      "enemyBullet",
+				X:         enemy.X + float64(enemy.Width)/2,
+				Y:         enemy.Y + float64(enemy.Height),
+				VelocityX: 0,
+				VelocityY: 3,
+				Width:     5,
+				Height:    5,
+			}
+			gameRoom.Bullets[bid] = eb
+		}
+	}
 
-		// 画面外に出たら削除
-		if bullet.Y < 0 || bullet.Y > 600 || bullet.X < 0 || bullet.X > 800 {
+	// 全弾を移動＆衝突判定
+	for id, b := range gameRoom.Bullets {
+		b.X += b.VelocityX
+		b.Y += b.VelocityY
+
+		// 画面外削除
+		if b.Y < 0 || b.Y > 600 || b.X < 0 || b.X > 800 {
 			delete(gameRoom.Bullets, id)
 			continue
 		}
 
-		// ボスとの衝突判定
-		if gameRoom.Boss != nil && checkCollision(bullet, gameRoom.Boss) {
-			// 衝突したら弾を削除、ボスにダメージ
-			delete(gameRoom.Bullets, id)
-			gameRoom.Boss.Health -= 1
-
-			// ボスを倒したらクリア
-			if gameRoom.Boss.Health <= 0 {
-				gameRoom.GameState = "clear"
-				gameRoom.Boss = nil
-
-				// 全プレイヤーにボーナススコア
-				for _, player := range gameRoom.Players {
-					player.Score += 500
+		// 敵／ボス→プレイヤー弾 の当たり判定
+		if b.Type == "enemyBullet" || b.Type == "bossBullet" {
+			for _, p := range gameRoom.Players {
+				if checkCollision(b, &p.Entity) {
+					delete(gameRoom.Bullets, id)
+					p.Health -= 15
+					if p.Health < 0 {
+						p.Health = 0
+					}
+					// 全滅チェック
+					allDead := true
+					for _, q := range gameRoom.Players {
+						if q.Health > 0 {
+							allDead = false
+							break
+						}
+					}
+					if allDead {
+						gameRoom.GameState = "gameover"
+					}
+					break
 				}
 			}
 			continue
 		}
 
-		// 敵との衝突判定
-		for enemyID, enemy := range gameRoom.Enemies {
-			if checkCollision(bullet, enemy) {
-				// 衝突したら敵と弾を削除、スコア加算
+		// プレイヤー弾 の既存処理＋アイテム生成
+		if b.Type == "bullet" {
+			// ボスとの衝突判定
+			if gameRoom.Boss != nil && checkCollision(b, gameRoom.Boss) {
+				// 衝突したら弾を削除、ボスにダメージ
 				delete(gameRoom.Bullets, id)
-				delete(gameRoom.Enemies, enemyID)
-				gameRoom.EnemiesDefeated++
+				gameRoom.Boss.Health -= 1
 
-				// 弾を発射したプレイヤーにスコア加算
-				for _, player := range gameRoom.Players {
-					if player.X == bullet.X && player.Y == bullet.Y {
-						player.Score += 10
-						break
+				// ボスを倒したらクリア
+				if gameRoom.Boss.Health <= 0 {
+					gameRoom.GameState = "clear"
+					gameRoom.Boss = nil
+
+					// 全プレイヤーにボーナススコア
+					for _, player := range gameRoom.Players {
+						player.Score += 500
 					}
 				}
+				continue
+			}
+
+			// 敵との衝突判定
+			for eid, e := range gameRoom.Enemies {
+				if checkCollision(b, e) {
+					delete(gameRoom.Bullets, id)
+					delete(gameRoom.Enemies, eid)
+					gameRoom.EnemiesDefeated++
+
+					// 敵倒時にアイテムを落とす
+					itemID := uuid.New().String()
+					it := &Entity{
+						ID:        itemID,
+						Type:      "item",
+						X:         e.X,
+						Y:         e.Y,
+						VelocityX: 0,
+						VelocityY: 1,
+						Width:     15,
+						Height:    15,
+						Health:    0,
+					}
+					gameRoom.Items[itemID] = it
+
+					// スコア加算
+					for _, player := range gameRoom.Players {
+						if player.X == b.X && player.Y == b.Y {
+							player.Score += 10
+							break
+						}
+					}
+					break
+				}
+			}
+			continue
+		}
+	}
+
+	// アイテム落下＆取得判定
+	for iid, it := range gameRoom.Items {
+		it.Y += it.VelocityY
+		if it.Y > 600 {
+			delete(gameRoom.Items, iid)
+			continue
+		}
+		for _, p := range gameRoom.Players {
+			if checkCollision(it, &p.Entity) {
+				// 取得で発射能力アップ
+				p.FirePower++
+				delete(gameRoom.Items, iid)
 				break
 			}
 		}
@@ -662,6 +746,7 @@ func broadcastGameState(gameRoom *GameRoom) {
 		"bullets":         gameRoom.Bullets,
 		"enemies":         gameRoom.Enemies,
 		"boss":            gameRoom.Boss,
+		"items":           gameRoom.Items,
 		"gameState":       gameRoom.GameState,
 		"enemiesDefeated": gameRoom.EnemiesDefeated,
 	}

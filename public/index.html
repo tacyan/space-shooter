@@ -130,6 +130,10 @@
 </head>
 <body>
     <div id="game-container">
+        <!-- 画像リソースの追加（実際に public/images フォルダに配置） -->
+        <img id="player-sprite" src="images/player.png" style="display:none;">
+        <img id="boss-sprite" src="images/dragon.png" style="display:none;">
+
         <canvas id="gameCanvas" width="800" height="600"></canvas>
         <div id="score-panel"></div>
         <div id="status">接続中...</div>
@@ -171,6 +175,8 @@
         const bossHealthFill = document.getElementById('boss-health-fill');
         const gameOverScreen = document.getElementById('game-over');
         const gameClearScreen = document.getElementById('game-clear');
+        const playerSprite = document.getElementById('player-sprite');
+        const bossSprite = document.getElementById('boss-sprite');
         
         // ゲーム状態の初期化
         let socket;
@@ -339,46 +345,8 @@
          * @param {Object} boss - ボスオブジェクト
          */
         function drawBoss(boss) {
-            // ボスの本体（大きな赤い六角形）
-            ctx.fillStyle = "#FF0000";
-            ctx.beginPath();
-            
-            // 六角形の描画
-            const centerX = boss.x + boss.width / 2;
-            const centerY = boss.y + boss.height / 2;
-            const radius = boss.width / 2;
-            
-            ctx.moveTo(centerX + radius, centerY);
-            for (let i = 1; i <= 6; i++) {
-                const angle = i * Math.PI / 3;
-                ctx.lineTo(
-                    centerX + radius * Math.cos(angle),
-                    centerY + radius * Math.sin(angle)
-                );
-            }
-            
-            ctx.closePath();
-            ctx.fill();
-            
-            // ボスの目（赤く光る）
-            const time = Date.now() / 500; // 時間によって点滅
-            const glowIntensity = 0.7 + 0.3 * Math.sin(time);
-            
-            // 赤く光る目
-            ctx.fillStyle = `rgba(255, ${Math.floor(100 * glowIntensity)}, 0, 1)`;
-            ctx.beginPath();
-            ctx.arc(centerX - radius / 3, centerY - radius / 4, 10, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.beginPath();
-            ctx.arc(centerX + radius / 3, centerY - radius / 4, 10, 0, Math.PI * 2);
-            ctx.fill();
-            
-            // 口（恐ろしい表情）
-            ctx.strokeStyle = "#FFFFFF";
-            ctx.lineWidth = 3;
-            ctx.beginPath();
-            ctx.arc(centerX, centerY + radius / 4, radius / 3, 0.1 * Math.PI, 0.9 * Math.PI);
-            ctx.stroke();
+            // 画像で描画（ドラゴン）
+            ctx.drawImage(bossSprite, boss.x, boss.y, boss.width, boss.height);
         }
         
         /**
@@ -409,45 +377,26 @@
          * @param {boolean} isCurrentPlayer - 現在のプレイヤーかどうか
          */
         function drawPlayer(player, isCurrentPlayer) {
-            // プレイヤーの宇宙船
-            ctx.fillStyle = player.color;
-            
-            // 宇宙船の本体
-            ctx.beginPath();
-            ctx.moveTo(player.x + player.width / 2, player.y);
-            ctx.lineTo(player.x, player.y + player.height);
-            ctx.lineTo(player.x + player.width, player.y + player.height);
-            ctx.closePath();
-            ctx.fill();
-            
-            // コックピット
-            ctx.fillStyle = "#FFFFFF";
-            ctx.beginPath();
-            ctx.arc(player.x + player.width / 2, player.y + player.height / 3, 5, 0, Math.PI * 2);
-            ctx.fill();
-            
-            // 推進器（エンジン）
-            ctx.fillStyle = "#FFAA00";
-            ctx.fillRect(player.x + player.width / 4, player.y + player.height, player.width / 8, player.height / 4);
-            ctx.fillRect(player.x + (player.width * 5) / 8, player.y + player.height, player.width / 8, player.height / 4);
-            
-            // プレイヤー名表示
+            // 画像で描画
+            ctx.drawImage(playerSprite, player.x, player.y, player.width, player.height);
+
+            // 名前表示
             ctx.fillStyle = "#FFF";
             ctx.font = "12px Arial";
             ctx.textAlign = "center";
             ctx.fillText(player.name, player.x + player.width / 2, player.y - 5);
-            
-            // 自分のプレイヤーには枠を表示
+
+            // 自分のプレイヤーなら枠表示
             if (isCurrentPlayer) {
                 ctx.strokeStyle = "#00FF00";
                 ctx.lineWidth = 2;
                 ctx.strokeRect(player.x - 2, player.y - 2, player.width + 4, player.height + 4);
             }
-            
-            // ヘルスバー
-            const healthWidth = player.width * (player.health / 100);
+
+            // ヘルスバー（画像下に）
+            const healthW = player.width * (player.health / 100);
             ctx.fillStyle = "#00FF00";
-            ctx.fillRect(player.x, player.y + player.height + 5, healthWidth, 5);
+            ctx.fillRect(player.x, player.y + player.height + 5, healthW, 5);
             ctx.strokeStyle = "#FFF";
             ctx.strokeRect(player.x, player.y + player.height + 5, player.width, 5);
         }
@@ -573,4 +522,4 @@
         connect();
     </script>
 </body>
-</html> 
+</html>
